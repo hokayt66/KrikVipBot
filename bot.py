@@ -1,6 +1,17 @@
 import os
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -12,11 +23,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Кнопка 3", callback_data="btn_3")],
     ]
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "Привет 👋\nВыбери кнопку ниже:",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -24,28 +33,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "btn_1":
-        text = "Ты нажал Кнопку 1"
-    elif query.data == "btn_2":
-        text = "Ты нажал Кнопку 2"
-    elif query.data == "btn_3":
-        text = "Ты нажал Кнопку 3"
-    else:
-        text = "Неизвестная кнопка"
+    texts = {
+        "btn_1": "Ты нажал Кнопку 1",
+        "btn_2": "Ты нажал Кнопку 2",
+        "btn_3": "Ты нажал Кнопку 3",
+    }
 
-    await query.edit_message_text(text=text)
+    await query.edit_message_text(
+        text=texts.get(query.data, "Неизвестная кнопка")
+    )
 
 
 def main():
     if not TOKEN:
-        raise ValueError("BOT_TOKEN не найден в переменных окружения")
+        logging.error("BOT_TOKEN не найден")
+        raise RuntimeError("BOT_TOKEN не задан")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    app.run_polling()
+    logging.info("Бот запущен")
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
