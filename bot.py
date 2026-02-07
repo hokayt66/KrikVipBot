@@ -1,62 +1,47 @@
 import os
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+import asyncio
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Кнопка 1", callback_data="btn_1")],
-        [InlineKeyboardButton("Кнопка 2", callback_data="btn_2")],
-        [InlineKeyboardButton("Кнопка 3", callback_data="btn_3")],
-    ]
+@dp.message(Command("start"))
+async def start(message: Message):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Кнопка 1", callback_data="btn_1")],
+        [InlineKeyboardButton(text="Кнопка 2", callback_data="btn_2")],
+        [InlineKeyboardButton(text="Кнопка 3", callback_data="btn_3")],
+    ])
 
-    await update.message.reply_text(
+    await message.answer(
         "Привет 👋\nВыбери кнопку ниже:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=keyboard
     )
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
+@dp.callback_query(F.data.startswith("btn_"))
+async def buttons(call: CallbackQuery):
     texts = {
         "btn_1": "Ты нажал Кнопку 1",
         "btn_2": "Ты нажал Кнопку 2",
         "btn_3": "Ты нажал Кнопку 3",
     }
 
-    await query.edit_message_text(
-        text=texts.get(query.data, "Неизвестная кнопка")
-    )
+    await call.message.edit_text(texts.get(call.data, "Неизвестная кнопка"))
+    await call.answer()
 
 
-def main():
-    if not TOKEN:
-        logging.error("BOT_TOKEN не найден")
-        raise RuntimeError("BOT_TOKEN не задан")
-
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    logging.info("Бот запущен")
-    app.run_polling(close_loop=False)
+async def main():
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
