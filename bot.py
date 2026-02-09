@@ -58,6 +58,10 @@ class JsonFSMStorage(BaseStorage):
         self.data.pop(str(key.user_id), None)
         self._save()
 
+    async def close(self):
+        # Обязательный метод для BaseStorage (aiogram 3.4.1)
+        pass
+
 # ================== BOT ==================
 
 bot = Bot(token=BOT_TOKEN)
