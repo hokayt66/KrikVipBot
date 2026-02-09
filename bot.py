@@ -60,12 +60,15 @@ async def start(message: Message):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🧊 TEST 🧊", callback_data="product_test")]
+            [InlineKeyboardButton(text="🧊 TEST 🧊", callback_data="product_test")],
+            [InlineKeyboardButton(text="🙋‍♀️ Оператор 🙋‍♀️", url="https://t.me/KrikVip")],
+            [InlineKeyboardButton(text="📢 Чат 📢", url="https://t.me/KrikVip")],
+            [InlineKeyboardButton(text="🚴‍♀️ Ищу курьера 🚴‍♀️", url="https://t.me/KrikVip")],
         ]
     )
 
     await message.answer(
-        "Выберите товар 📞:",
+        "Главное меню (Сумы)📞:",
         reply_markup=keyboard
     )
 
@@ -105,13 +108,11 @@ async def test_areas(call: CallbackQuery):
     )
     await call.answer()
 
-# ---------- ВЫБОР РАЙОНА (пока заглушка) ----------
+# ---------- ВЫБОР РАЙОНА (заглушка) ----------
 
 @dp.callback_query(F.data == "selected_area")
 async def area_selected(call: CallbackQuery):
-    await call.message.edit_text(
-        "Район выбран ✅"
-    )
+    await call.message.edit_text("Район выбран ✅")
     await call.answer()
 
 # ---------- НАЗАД ----------
