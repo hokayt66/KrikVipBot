@@ -16,8 +16,7 @@ from pdf_checker import check_pdf
 # ================== CONFIG ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # твой Telegram ID
-CARD_LAST4 = "4821"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 STICKER_ID = "CAACAgIAAxkBAAIXo2mJlDUnJgJtip4xMw6mOz75nLKCAAKtcQACB4pYS9zy4G9qyrjcOgQ"
 
@@ -125,15 +124,17 @@ async def timeout(uid):
 
 def restore_timers():
     now = int(time.time())
-    for uid, data in orders.items():
+    for uid, data in list(orders.items()):
         left = ORDER_TIMEOUT - (now - data["created_at"])
         if left <= 0:
+            orders.pop(uid, None)
             continue
-        uid = int(uid)
-        timers[uid] = (
-            asyncio.create_task(reminder(uid)),
-            asyncio.create_task(timeout(uid))
+        uid_i = int(uid)
+        timers[uid_i] = (
+            asyncio.create_task(reminder(uid_i)),
+            asyncio.create_task(timeout(uid_i))
         )
+    save_orders(orders)
 
 # ================== START ==================
 
@@ -165,17 +166,14 @@ async def choose_weight(call: CallbackQuery, state: FSMContext):
             for k, v in PRODUCTS.items()
         ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back")]]
     )
+
     await state.set_state(OrderState.choosing_weight)
     await call.message.edit_text("Выберите вес:", reply_markup=kb)
 
 @dp.callback_query(F.data.in_(PRODUCTS))
 async def choose_area(call: CallbackQuery, state: FSMContext):
     name, price = PRODUCTS[call.data]
-    await state.update_data(
-        key=call.data,
-        name=name,
-        price=price,
-    )
+    await state.update_data(key=call.data, name=name, price=price)
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -211,10 +209,7 @@ async def payment(call: CallbackQuery, state: FSMContext):
     uid = call.from_user.id
     data = await state.get_data()
 
-    orders[str(uid)] = {
-        **data,
-        "created_at": int(time.time())
-    }
+    orders[str(uid)] = {**data, "created_at": int(time.time())}
     save_orders(orders)
 
     timers[uid] = (
@@ -230,41 +225,53 @@ async def payment(call: CallbackQuery, state: FSMContext):
         f"После оплаты отправьте PDF-чек"
     )
 
-# ================== PDF ==================
+# ================== PDF (STRICT FSM) ==================
 
-@dp.message(F.document)
-async def pdf_handler(msg: Message, state: FSMContext):
-    if msg.document.mime_type != "application/pdf":
-        await msg.answer("❌ Нужен PDF файл")
+@dp.message(OrderState.waiting_payment, F.document)
+async def pdf_handler(message: Message, state: FSMContext):
+    if message.document.mime_type != "application/pdf":
+        await message.answer("❌ Отправьте PDF файл")
         return
 
-    uid = msg.from_user.id
-    if str(uid) not in orders:
-        await msg.answer("❌ Нет активного заказа")
+    uid = message.from_user.id
+    order = orders.get(str(uid))
+    if not order:
+        await message.answer("❌ Активный заказ не найден")
         return
+
+    await state.set_state(OrderState.checking_pdf)
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        await msg.document.download(destination=tmp.name)
-        path = tmp.name
+        await message.document.download(destination=tmp.name)
+        pdf_path = tmp.name
 
-    order = orders[str(uid)]
-    result = check_pdf(path, order["created_at"], order["price"])
+    result = check_pdf(pdf_path, order["created_at"], order["price"])
+    os.unlink(pdf_path)
 
-    if result["status"] == "ok":
-        orders.pop(str(uid))
+    if result.get("status") == "ok":
+        for t in timers.pop(uid, []):
+            t.cancel()
+
+        orders.pop(str(uid), None)
         save_orders(orders)
         await state.clear()
-        await msg.answer("✅ Платёж подтверждён автоматически")
+        await message.answer("✅ Платёж подтверждён автоматически")
         return
+
+    if result.get("status") == "reject":
+        await state.set_state(OrderState.waiting_payment)
+        await message.answer(f"❌ Чек отклонён\nПричина: {result.get('reason')}")
+        return
+
+    # suspicious
+    await state.set_state(OrderState.waiting_payment)
+    await message.answer("⚠️ Чек отправлен на ручную проверку оператору")
 
     if ADMIN_ID:
         await bot.send_message(
             ADMIN_ID,
-            f"⚠️ Чек требует проверки\n{result}",
+            f"⚠️ Подозрительный чек от {uid}\n{result}"
         )
-        await msg.answer("⏳ Чек отправлен на проверку оператору")
-    else:
-        await msg.answer("⚠️ Не удалось автоматически подтвердить")
 
 # ================== BACK ==================
 
