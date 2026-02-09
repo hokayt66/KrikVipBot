@@ -2,6 +2,7 @@ import os
 import json
 import time
 import asyncio
+import tempfile
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -10,21 +11,23 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
 
+from pdf_checker import check_pdf
+
 # ================== CONFIG ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не задан")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # твой Telegram ID
+CARD_LAST4 = "4821"
 
 STICKER_ID = "CAACAgIAAxkBAAIXo2mJlDUnJgJtip4xMw6mOz75nLKCAAKtcQACB4pYS9zy4G9qyrjcOgQ"
-
-ORDERS_FILE = "orders.json"
-FSM_FILE = "fsm_storage.json"
 
 ORDER_TIMEOUT = 15 * 60
 REMINDER_TIME = 5 * 60
 
-# ================== JSON FSM STORAGE ==================
+ORDERS_FILE = "orders.json"
+FSM_FILE = "fsm_storage.json"
+
+# ================== FSM STORAGE ==================
 
 class JsonFSMStorage(BaseStorage):
     def __init__(self, path: str):
@@ -59,12 +62,11 @@ class JsonFSMStorage(BaseStorage):
         self._save()
 
     async def close(self):
-        # Обязательный метод для BaseStorage (aiogram 3.4.1)
         pass
 
 # ================== BOT ==================
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=JsonFSMStorage(FSM_FILE))
 
 # ================== FSM ==================
@@ -74,40 +76,25 @@ class OrderState(StatesGroup):
     choosing_area = State()
     confirming = State()
     waiting_payment = State()
+    checking_pdf = State()
 
 # ================== DATA ==================
 
-TEST_PRODUCTS = {
-    "test_025": "🧊 TEST 0.25g 🧊",
-    "test_05": "🧊 TEST 0.5g 🧊",
-    "test_1": "🧊 TEST 1g 🧊",
-    "test_2": "🧊 TEST 2g 🧊",
+PRODUCTS = {
+    "t025": ("🧊 TEST 0.25g 🧊", 1),
+    "t05": ("🧊 TEST 0.5g 🧊", 3),
+    "t1": ("🧊 TEST 1g 🧊", 5),
+    "t2": ("🧊 TEST 2g 🧊", 7),
 }
 
-TEST_PRICES = {
-    "test_025": 1,
-    "test_05": 3,
-    "test_1": 5,
-    "test_2": 7,
+AREAS = {
+    "t025": ["🏠 Харьковская 🏠", "🏠 СКД 🏠"],
+    "t05": ["🏠 Прокофьева 🏠", "🏠 9ка 🏠"],
+    "t1": ["🏠 Химик 🏠"],
+    "t2": ["🏠 Харьковская 🏠", "🏠 СКД 🏠", "🏠 9ка 🏠"],
 }
 
-TEST_AREAS = {
-    "test_025": ["🏠 Харьковская 🏠", "🏠 СКД 🏠"],
-    "test_05": ["🏠 Прокофьева 🏠", "🏠 9ка 🏠", "🏠 12й 🏠"],
-    "test_1": ["🏠 Химик 🏠", "🏠 СКД 🏠"],
-    "test_2": [
-        "🏠 Харьковская 🏠",
-        "🏠 СКД 🏠",
-        "🏠 Прокофьева 🏠",
-        "🏠 9ка 🏠",
-        "🏠 12й 🏠",
-        "🏠 Химик 🏠",
-    ],
-}
-
-# ================== STORAGE ==================
-
-active_timers = {}
+# ================== ORDERS ==================
 
 def load_orders():
     if not os.path.exists(ORDERS_FILE):
@@ -119,215 +106,175 @@ def save_orders(data):
     with open(ORDERS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-orders_store = load_orders()
-
-# ================== HELPERS ==================
-
-async def has_active_order(user_id: int, state: FSMContext) -> bool:
-    if str(user_id) in orders_store:
-        return True
-    return await state.get_state() is not None
+orders = load_orders()
+timers = {}
 
 # ================== TIMERS ==================
 
-async def reminder_task(user_id: int, delay: int):
-    await asyncio.sleep(delay)
-    await bot.send_message(user_id, "⏰ Напоминание!\nДо отмены заказа осталось 5 минут.")
+async def reminder(uid):
+    await asyncio.sleep(ORDER_TIMEOUT - REMINDER_TIME)
+    await bot.send_message(uid, "⏰ Напоминание: до отмены заказа 5 минут.")
 
-async def timeout_task(user_id: int, delay: int):
-    await asyncio.sleep(delay)
-
-    orders_store.pop(str(user_id), None)
-    save_orders(orders_store)
-
-    try:
-        ctx = dp.fsm.get_context(bot, user_id, user_id)
-        await ctx.clear()
-    except:
-        pass
-
-    await bot.send_message(user_id, "❌ Время на оплату истекло.\nЗаказ отменён.")
+async def timeout(uid):
+    await asyncio.sleep(ORDER_TIMEOUT)
+    orders.pop(str(uid), None)
+    save_orders(orders)
+    ctx = dp.fsm.get_context(bot, uid, uid)
+    await ctx.clear()
+    await bot.send_message(uid, "❌ Заказ отменён по тайм-ауту.")
 
 def restore_timers():
     now = int(time.time())
-
-    for user_id, order in list(orders_store.items()):
-        created = order.get("created_at", now)
-        remaining = ORDER_TIMEOUT - (now - created)
-
-        if remaining <= 0:
-            orders_store.pop(user_id, None)
+    for uid, data in orders.items():
+        left = ORDER_TIMEOUT - (now - data["created_at"])
+        if left <= 0:
             continue
-
-        uid = int(user_id)
-
-        r_task = None
-        if remaining > REMINDER_TIME:
-            r_task = asyncio.create_task(
-                reminder_task(uid, remaining - REMINDER_TIME)
-            )
-
-        t_task = asyncio.create_task(timeout_task(uid, remaining))
-        active_timers[uid] = (t_task, r_task)
-
-    save_orders(orders_store)
+        uid = int(uid)
+        timers[uid] = (
+            asyncio.create_task(reminder(uid)),
+            asyncio.create_task(timeout(uid))
+        )
 
 # ================== START ==================
 
 @dp.message(Command("start"))
-async def start(message: Message, state: FSMContext):
+async def start(msg: Message, state: FSMContext):
     await state.clear()
-    await message.answer_sticker(STICKER_ID)
+    await msg.answer_sticker(STICKER_ID)
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🧊 TEST 🧊", callback_data="product_test")],
-            [InlineKeyboardButton(text="🙋‍♀️ Оператор 🙋‍♀️", url="https://example.com")],
-            [InlineKeyboardButton(text="📢 Чат 📢", url="https://example.com")],
-            [InlineKeyboardButton(text="🚴‍♀️ Ищу курьера 🚴‍♀️", url="https://example.com")],
-        ]
-    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧊 TEST 🧊", callback_data="test")],
+        [InlineKeyboardButton(text="🙋‍♀️ Оператор 🙋‍♀️", url="https://t.me/KrikVip")],
+        [InlineKeyboardButton(text="📢 Чат 📢", url="https://t.me/KrikVip")],
+        [InlineKeyboardButton(text="🚴‍♀️ Ищу курьера 🚴‍♀️", url="https://t.me/KrikVip")],
+    ])
 
-    await message.answer("Главное меню (Сумы)📞:", reply_markup=keyboard)
+    await msg.answer("Главное меню (Сумы)📞:", reply_markup=kb)
 
-# ================== PRODUCT ==================
+# ================== PRODUCT FLOW ==================
 
-@dp.callback_query(F.data == "product_test")
+@dp.callback_query(F.data == "test")
 async def choose_weight(call: CallbackQuery, state: FSMContext):
-    if await has_active_order(call.from_user.id, state):
-        await call.answer(
-            "❗ У вас уже есть активный заказ.\nЗавершите его или дождитесь отмены.",
-            show_alert=True
-        )
+    if str(call.from_user.id) in orders:
+        await call.answer("❗ У вас уже есть активный заказ", show_alert=True)
         return
 
-    keyboard = InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=v, callback_data=k)]
-            for k, v in TEST_PRODUCTS.items()
-        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_start")]]
+            [InlineKeyboardButton(text=v[0], callback_data=k)]
+            for k, v in PRODUCTS.items()
+        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back")]]
     )
-
     await state.set_state(OrderState.choosing_weight)
-    await call.message.edit_text("🧊 TEST\nВыберите вес:", reply_markup=keyboard)
-    await call.answer()
+    await call.message.edit_text("Выберите вес:", reply_markup=kb)
 
-# ================== AREA ==================
-
-@dp.callback_query(F.data.in_(TEST_PRODUCTS))
+@dp.callback_query(F.data.in_(PRODUCTS))
 async def choose_area(call: CallbackQuery, state: FSMContext):
+    name, price = PRODUCTS[call.data]
     await state.update_data(
-        product_key=call.data,
-        product_name=TEST_PRODUCTS[call.data],
-        price=TEST_PRICES[call.data],
+        key=call.data,
+        name=name,
+        price=price,
     )
 
-    keyboard = InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=a, callback_data=f"area_{i}")]
-            for i, a in enumerate(TEST_AREAS[call.data])
-        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="product_test")]]
+            for i, a in enumerate(AREAS[call.data])
+        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="test")]]
     )
 
     await state.set_state(OrderState.choosing_area)
-    await call.message.edit_text(
-        f"{TEST_PRODUCTS[call.data]}\nВыберите район:",
-        reply_markup=keyboard
-    )
-    await call.answer()
-
-# ================== CONFIRM ==================
+    await call.message.edit_text("Выберите район:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("area_"))
 async def confirm(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    idx = int(call.data.split("_")[1])
-    area = TEST_AREAS[data["product_key"]][idx]
-
+    area = AREAS[data["key"]][int(call.data.split("_")[1])]
     await state.update_data(area=area)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить ✅", callback_data="pay")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=data["key"])],
+    ])
+
     await state.set_state(OrderState.confirming)
-
-    text = (
-        "🧾 Подтверждение заказа\n\n"
-        f"{data['product_name']}\n"
-        f"Район: {area}\n"
-        f"Сумма: {data['price']} грн\n\n"
-        "Подтвердить покупку?"
+    await call.message.edit_text(
+        f"{data['name']}\nРайон: {area}\nЦена: {data['price']} грн\n\nПодтвердить?",
+        reply_markup=kb
     )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтвердить ✅", callback_data="confirm_payment")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data=data["product_key"])],
-        ]
-    )
-
-    await call.message.edit_text(text, reply_markup=keyboard)
-    await call.answer()
 
 # ================== PAYMENT ==================
 
-@dp.callback_query(F.data == "confirm_payment")
+@dp.callback_query(F.data == "pay")
 async def payment(call: CallbackQuery, state: FSMContext):
-    user_id = call.from_user.id
+    uid = call.from_user.id
     data = await state.get_data()
 
-    if str(user_id) in orders_store:
-        await call.answer("❗ Заказ уже существует", show_alert=True)
-        return
+    orders[str(uid)] = {
+        **data,
+        "created_at": int(time.time())
+    }
+    save_orders(orders)
 
-    data["created_at"] = int(time.time())
-    orders_store[str(user_id)] = data
-    save_orders(orders_store)
-
-    r = asyncio.create_task(reminder_task(user_id, ORDER_TIMEOUT - REMINDER_TIME))
-    t = asyncio.create_task(timeout_task(user_id, ORDER_TIMEOUT))
-    active_timers[user_id] = (t, r)
+    timers[uid] = (
+        asyncio.create_task(reminder(uid)),
+        asyncio.create_task(timeout(uid))
+    )
 
     await state.set_state(OrderState.waiting_payment)
-
     await call.message.edit_text(
-        "💳 PAYMENT_DETAILS_HERE 💳\n\n"
+        f"💳 5168240100724821 💳\n"
         f"🏷️ {data['price']} грн 🏷️\n"
-        "⏳ Время на оплату: 15 минут ⏳\n\n"
-        "❗ После оплаты отправьте PDF-файл напрямую боту ❗"
+        f"⏳ 15 минут ⏳\n\n"
+        f"После оплаты отправьте PDF-чек"
     )
-    await call.answer()
 
 # ================== PDF ==================
 
 @dp.message(F.document)
-async def receive_pdf(message: Message, state: FSMContext):
-    if message.document.mime_type != "application/pdf":
-        await message.answer("❌ Отправьте PDF файл.")
+async def pdf_handler(msg: Message, state: FSMContext):
+    if msg.document.mime_type != "application/pdf":
+        await msg.answer("❌ Нужен PDF файл")
         return
 
-    uid = message.from_user.id
+    uid = msg.from_user.id
+    if str(uid) not in orders:
+        await msg.answer("❌ Нет активного заказа")
+        return
 
-    timers = active_timers.pop(uid, None)
-    if timers:
-        for t in timers:
-            if t:
-                t.cancel()
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        await msg.document.download(destination=tmp.name)
+        path = tmp.name
 
-    orders_store.pop(str(uid), None)
-    save_orders(orders_store)
+    order = orders[str(uid)]
+    result = check_pdf(path, order["created_at"], order["price"])
 
-    await state.clear()
-    await message.answer("✅ Файл получен. Заказ завершён.")
+    if result["status"] == "ok":
+        orders.pop(str(uid))
+        save_orders(orders)
+        await state.clear()
+        await msg.answer("✅ Платёж подтверждён автоматически")
+        return
+
+    if ADMIN_ID:
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚠️ Чек требует проверки\n{result}",
+        )
+        await msg.answer("⏳ Чек отправлен на проверку оператору")
+    else:
+        await msg.answer("⚠️ Не удалось автоматически подтвердить")
 
 # ================== BACK ==================
 
-@dp.callback_query(F.data == "back_start")
+@dp.callback_query(F.data == "back")
 async def back(call: CallbackQuery, state: FSMContext):
-    await state.clear()
     await start(call.message, state)
-    await call.answer()
 
 # ================== RUN ==================
 
 async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
     restore_timers()
     await dp.start_polling(bot)
 
