@@ -8,9 +8,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.file import FileStorage
+from aiogram.fsm.storage.base import BaseStorage, StorageKey
 
-# ---------------- CONFIG ----------------
+# ================== CONFIG ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -24,12 +24,46 @@ FSM_FILE = "fsm_storage.json"
 ORDER_TIMEOUT = 15 * 60
 REMINDER_TIME = 5 * 60
 
-# ---------------- BOT ----------------
+# ================== JSON FSM STORAGE ==================
+
+class JsonFSMStorage(BaseStorage):
+    def __init__(self, path: str):
+        self.path = path
+        self.data = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                self.data = json.load(f)
+
+    def _save(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+    async def set_state(self, key: StorageKey, state):
+        uid = str(key.user_id)
+        self.data.setdefault(uid, {})["state"] = state.state if state else None
+        self._save()
+
+    async def get_state(self, key: StorageKey):
+        return self.data.get(str(key.user_id), {}).get("state")
+
+    async def set_data(self, key: StorageKey, data: dict):
+        uid = str(key.user_id)
+        self.data.setdefault(uid, {})["data"] = data
+        self._save()
+
+    async def get_data(self, key: StorageKey):
+        return self.data.get(str(key.user_id), {}).get("data", {})
+
+    async def clear(self, key: StorageKey):
+        self.data.pop(str(key.user_id), None)
+        self._save()
+
+# ================== BOT ==================
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=FileStorage(FSM_FILE))
+dp = Dispatcher(storage=JsonFSMStorage(FSM_FILE))
 
-# ---------------- FSM ----------------
+# ================== FSM ==================
 
 class OrderState(StatesGroup):
     choosing_weight = State()
@@ -37,7 +71,7 @@ class OrderState(StatesGroup):
     confirming = State()
     waiting_payment = State()
 
-# ---------------- DATA ----------------
+# ================== DATA ==================
 
 TEST_PRODUCTS = {
     "test_025": "🧊 TEST 0.25g 🧊",
@@ -67,7 +101,7 @@ TEST_AREAS = {
     ],
 }
 
-# ---------------- STORAGE ----------------
+# ================== STORAGE ==================
 
 active_timers = {}
 
@@ -83,22 +117,18 @@ def save_orders(data):
 
 orders_store = load_orders()
 
-# ---------------- UTILS ----------------
+# ================== HELPERS ==================
 
 async def has_active_order(user_id: int, state: FSMContext) -> bool:
     if str(user_id) in orders_store:
         return True
-    current = await state.get_state()
-    return current is not None
+    return await state.get_state() is not None
 
-# ---------------- TIMERS ----------------
+# ================== TIMERS ==================
 
 async def reminder_task(user_id: int, delay: int):
     await asyncio.sleep(delay)
-    await bot.send_message(
-        user_id,
-        "⏰ Напоминание!\nДо отмены заказа осталось 5 минут."
-    )
+    await bot.send_message(user_id, "⏰ Напоминание!\nДо отмены заказа осталось 5 минут.")
 
 async def timeout_task(user_id: int, delay: int):
     await asyncio.sleep(delay)
@@ -107,23 +137,19 @@ async def timeout_task(user_id: int, delay: int):
     save_orders(orders_store)
 
     try:
-        state = dp.fsm.get_context(bot, user_id, user_id)
-        await state.clear()
+        ctx = dp.fsm.get_context(bot, user_id, user_id)
+        await ctx.clear()
     except:
         pass
 
-    await bot.send_message(
-        user_id,
-        "❌ Время на оплату истекло.\nЗаказ отменён."
-    )
+    await bot.send_message(user_id, "❌ Время на оплату истекло.\nЗаказ отменён.")
 
 def restore_timers():
     now = int(time.time())
 
     for user_id, order in list(orders_store.items()):
         created = order.get("created_at", now)
-        passed = now - created
-        remaining = ORDER_TIMEOUT - passed
+        remaining = ORDER_TIMEOUT - (now - created)
 
         if remaining <= 0:
             orders_store.pop(user_id, None)
@@ -142,7 +168,7 @@ def restore_timers():
 
     save_orders(orders_store)
 
-# ---------------- START ----------------
+# ================== START ==================
 
 @dp.message(Command("start"))
 async def start(message: Message, state: FSMContext):
@@ -160,7 +186,7 @@ async def start(message: Message, state: FSMContext):
 
     await message.answer("Главное меню (Сумы)📞:", reply_markup=keyboard)
 
-# ---------------- PRODUCT ----------------
+# ================== PRODUCT ==================
 
 @dp.callback_query(F.data == "product_test")
 async def choose_weight(call: CallbackQuery, state: FSMContext):
@@ -173,8 +199,8 @@ async def choose_weight(call: CallbackQuery, state: FSMContext):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=name, callback_data=key)]
-            for key, name in TEST_PRODUCTS.items()
+            [InlineKeyboardButton(text=v, callback_data=k)]
+            for k, v in TEST_PRODUCTS.items()
         ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_start")]]
     )
 
@@ -182,7 +208,7 @@ async def choose_weight(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("🧊 TEST\nВыберите вес:", reply_markup=keyboard)
     await call.answer()
 
-# ---------------- AREA ----------------
+# ================== AREA ==================
 
 @dp.callback_query(F.data.in_(TEST_PRODUCTS))
 async def choose_area(call: CallbackQuery, state: FSMContext):
@@ -192,12 +218,10 @@ async def choose_area(call: CallbackQuery, state: FSMContext):
         price=TEST_PRICES[call.data],
     )
 
-    areas = TEST_AREAS[call.data]
-
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=area, callback_data=f"area_{i}")]
-            for i, area in enumerate(areas)
+            [InlineKeyboardButton(text=a, callback_data=f"area_{i}")]
+            for i, a in enumerate(TEST_AREAS[call.data])
         ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="product_test")]]
     )
 
@@ -208,7 +232,7 @@ async def choose_area(call: CallbackQuery, state: FSMContext):
     )
     await call.answer()
 
-# ---------------- CONFIRM ----------------
+# ================== CONFIRM ==================
 
 @dp.callback_query(F.data.startswith("area_"))
 async def confirm(call: CallbackQuery, state: FSMContext):
@@ -237,7 +261,7 @@ async def confirm(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(text, reply_markup=keyboard)
     await call.answer()
 
-# ---------------- PAYMENT ----------------
+# ================== PAYMENT ==================
 
 @dp.callback_query(F.data == "confirm_payment")
 async def payment(call: CallbackQuery, state: FSMContext):
@@ -245,57 +269,50 @@ async def payment(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
     if str(user_id) in orders_store:
-        await call.answer("❗ Заказ уже создан", show_alert=True)
+        await call.answer("❗ Заказ уже существует", show_alert=True)
         return
 
     data["created_at"] = int(time.time())
     orders_store[str(user_id)] = data
     save_orders(orders_store)
 
-    r_task = asyncio.create_task(
-        reminder_task(user_id, ORDER_TIMEOUT - REMINDER_TIME)
-    )
-    t_task = asyncio.create_task(
-        timeout_task(user_id, ORDER_TIMEOUT)
-    )
-
-    active_timers[user_id] = (t_task, r_task)
+    r = asyncio.create_task(reminder_task(user_id, ORDER_TIMEOUT - REMINDER_TIME))
+    t = asyncio.create_task(timeout_task(user_id, ORDER_TIMEOUT))
+    active_timers[user_id] = (t, r)
 
     await state.set_state(OrderState.waiting_payment)
 
-    text = (
+    await call.message.edit_text(
         "💳 PAYMENT_DETAILS_HERE 💳\n\n"
         f"🏷️ {data['price']} грн 🏷️\n"
         "⏳ Время на оплату: 15 минут ⏳\n\n"
         "❗ После оплаты отправьте PDF-файл напрямую боту ❗"
     )
-
-    await call.message.edit_text(text)
     await call.answer()
 
-# ---------------- PDF ----------------
+# ================== PDF ==================
 
 @dp.message(F.document)
 async def receive_pdf(message: Message, state: FSMContext):
     if message.document.mime_type != "application/pdf":
-        await message.answer("❌ Отправьте файл в формате PDF.")
+        await message.answer("❌ Отправьте PDF файл.")
         return
 
-    user_id = message.from_user.id
+    uid = message.from_user.id
 
-    timers = active_timers.pop(user_id, None)
+    timers = active_timers.pop(uid, None)
     if timers:
         for t in timers:
             if t:
                 t.cancel()
 
-    orders_store.pop(str(user_id), None)
+    orders_store.pop(str(uid), None)
     save_orders(orders_store)
 
     await state.clear()
     await message.answer("✅ Файл получен. Заказ завершён.")
 
-# ---------------- BACK ----------------
+# ================== BACK ==================
 
 @dp.callback_query(F.data == "back_start")
 async def back(call: CallbackQuery, state: FSMContext):
@@ -303,7 +320,7 @@ async def back(call: CallbackQuery, state: FSMContext):
     await start(call.message, state)
     await call.answer()
 
-# ---------------- RUN ----------------
+# ================== RUN ==================
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
