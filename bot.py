@@ -17,16 +17,13 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ✅ ID твоего стикера
 STICKER_ID = "CAACAgIAAxkBAAIXo2mJlDUnJgJtip4xMw6mOz75nLKCAAKtcQACB4pYS9zy4G9qyrjcOgQ"
 
 
 @dp.message(Command("start"))
 async def start(message: Message):
-    # Отправляем стикер
     await message.answer_sticker(STICKER_ID)
 
-    # Кнопка товара
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -38,7 +35,6 @@ async def start(message: Message):
         ]
     )
 
-    # Текст + кнопка
     await message.answer(
         "Выберите товар 📞:",
         reply_markup=keyboard
@@ -46,8 +42,37 @@ async def start(message: Message):
 
 
 @dp.callback_query(F.data == "product_apvp")
-async def apvp_product(call: CallbackQuery):
-    await call.message.edit_text("Вы выбрали 🧊 A-PVP 🧊")
+async def apvp_menu(call: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧊A-PVP 0.25g🧊", callback_data="apvp_025")],
+            [InlineKeyboardButton(text="🧊A-PVP 0.5g🧊", callback_data="apvp_05")],
+            [InlineKeyboardButton(text="🧊A-PVP 1g🧊", callback_data="apvp_1")],
+            [InlineKeyboardButton(text="🧊A-PVP 2g🧊", callback_data="apvp_2")],
+        ]
+    )
+
+    await call.message.edit_text(
+        "🧊 A-PVP\nВыберите вес:",
+        reply_markup=keyboard
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("apvp_"))
+async def apvp_weight(call: CallbackQuery):
+    weights = {
+        "apvp_025": "0.25g",
+        "apvp_05": "0.5g",
+        "apvp_1": "1g",
+        "apvp_2": "2g",
+    }
+
+    weight = weights.get(call.data, "неизвестно")
+
+    await call.message.edit_text(
+        f"Вы выбрали 🧊 A-PVP {weight} 🧊"
+    )
     await call.answer()
 
 
