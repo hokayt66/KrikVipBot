@@ -16,20 +16,22 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
 
-from pdf_checker import check_pdf
-
-# ================= CONFIG =================
+# ================== НАСТРОЙКИ ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-ORDER_TIMEOUT = 15 * 60
-REMINDER_TIME = 5 * 60
+ORDER_TIMEOUT = 15 * 60        # 15 минут
+REMINDER_BEFORE = 5 * 60       # напоминание за 5 минут
 
 ORDERS_FILE = "orders.json"
 FSM_FILE = "fsm_storage.json"
 
-# ================= FSM STORAGE =================
+STICKER_ID = "CAACAgIAAxkBAAIXo2mJlDUnJgJtip4xMw6mOz75nLKCAAKtcQACB4pYS9zy4G9qyrjcOgQ"
+
+CARD_NUMBER = "5168240100724821"
+
+# ================== FSM STORAGE (JSON) ==================
 
 class JsonFSMStorage(BaseStorage):
     def __init__(self, path: str):
@@ -66,19 +68,14 @@ class JsonFSMStorage(BaseStorage):
     async def close(self):
         pass
 
-# ================= BOT =================
-
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher(storage=JsonFSMStorage(FSM_FILE))
-
-# ================= FSM =================
+# ================== FSM STATES ==================
 
 class OrderState(StatesGroup):
     choosing = State()
     confirming = State()
     waiting_payment = State()
 
-# ================= PRODUCTS =================
+# ================== ДАННЫЕ ==================
 
 PRODUCTS = {
     "0.25": 1,
@@ -87,7 +84,16 @@ PRODUCTS = {
     "2": 7,
 }
 
-# ================= ORDERS =================
+REGIONS = [
+    "🏠 Харьковская 🏠",
+    "🏠 СКД 🏠",
+    "🏠 Прокофьева 🏠",
+    "🏠 9ка 🏠",
+    "🏠 12й 🏠",
+    "🏠 Химик 🏠",
+]
+
+# ================== ЗАКАЗЫ ==================
 
 def load_orders():
     if not os.path.exists(ORDERS_FILE):
@@ -102,69 +108,119 @@ def save_orders(data):
 orders = load_orders()
 timers = {}
 
-# ================= TIMERS =================
+# ================== BOT ==================
 
-async def reminder(uid: int):
-    await asyncio.sleep(ORDER_TIMEOUT - REMINDER_TIME)
-    await bot.send_message(uid, "⏰ Напоминание: до отмены заказа 5 минут")
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher(storage=JsonFSMStorage(FSM_FILE))
 
-async def timeout(uid: int):
+# ================== ТАЙМЕРЫ ==================
+
+async def reminder_timer(uid: int):
+    await asyncio.sleep(ORDER_TIMEOUT - REMINDER_BEFORE)
+    if str(uid) in orders:
+        await bot.send_message(uid, "⏰ Напоминание: до отмены заказа осталось 5 минут")
+
+async def cancel_timer(uid: int):
     await asyncio.sleep(ORDER_TIMEOUT)
-    orders.pop(str(uid), None)
-    save_orders(orders)
-    ctx = dp.fsm.get_context(bot, uid, uid)
-    await ctx.clear()
-    await bot.send_message(uid, "❌ Заказ отменён по тайм-ауту")
+    if str(uid) in orders:
+        orders.pop(str(uid), None)
+        save_orders(orders)
+        ctx = dp.fsm.get_context(bot, uid, uid)
+        await ctx.clear()
+        await bot.send_message(uid, "❌ Заказ отменён по тайм-ауту")
 
-# ================= START =================
+# ================== START ==================
 
 @dp.message(Command("start"))
-async def start(msg: Message, state: FSMContext):
+async def start(message: Message, state: FSMContext):
     await state.clear()
 
+    await message.answer_sticker(STICKER_ID)
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧊 TEST 🧊", callback_data="test")],
+        [InlineKeyboardButton(text="🧊 TEST 🧊", callback_data="product_test")],
+        [InlineKeyboardButton(text="🙋‍♀️ Оператор 🙋‍♀️", url="https://t.me/KrikVip")],
+        [InlineKeyboardButton(text="📢 Чат 📢", url="https://t.me/KrikVip")],
+        [InlineKeyboardButton(text="🚴‍♀️ Ищу курьера 🚴‍♀️", url="https://t.me/KrikVip")],
     ])
 
-    await msg.answer("Главное меню (Сумы)📞:", reply_markup=kb)
+    await message.answer(
+        "Главное меню (Сумы)📞:",
+        reply_markup=kb
+    )
 
-# ================= FLOW =================
+# ================== ВЫБОР ВЕСА ==================
 
-@dp.callback_query(F.data == "test")
-async def choose(call: CallbackQuery, state: FSMContext):
-    if str(call.from_user.id) in orders:
+@dp.callback_query(F.data == "product_test")
+async def choose_weight(call: CallbackQuery, state: FSMContext):
+    uid = str(call.from_user.id)
+    if uid in orders:
         await call.answer("❗ У вас уже есть активный заказ", show_alert=True)
         return
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{k}g — {v} грн", callback_data=k)]
-            for k, v in PRODUCTS.items()
-        ]
+            [InlineKeyboardButton(text=f"🧊 TEST {w}g 🧊", callback_data=f"w_{w}")]
+            for w in PRODUCTS
+        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]]
     )
 
     await state.set_state(OrderState.choosing)
-    await call.message.edit_text("Выберите товар:", reply_markup=kb)
+    await call.message.edit_text("Выберите вес:", reply_markup=kb)
 
-@dp.callback_query(F.data.in_(PRODUCTS))
-async def confirm(call: CallbackQuery, state: FSMContext):
-    price = PRODUCTS[call.data]
+@dp.callback_query(F.data == "back_main")
+async def back_main(call: CallbackQuery, state: FSMContext):
+    await start(call.message, state)
 
-    await state.update_data(weight=call.data, price=price)
-    await state.set_state(OrderState.confirming)
+# ================== ВЫБОР РАЙОНА ==================
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="pay")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="test")],
-    ])
+@dp.callback_query(F.data.startswith("w_"))
+async def choose_region(call: CallbackQuery, state: FSMContext):
+    weight = call.data.replace("w_", "")
+    price = PRODUCTS[weight]
+
+    await state.update_data(weight=weight, price=price)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=r, callback_data=f"r_{i}")]
+            for i, r in enumerate(REGIONS)
+        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="product_test")]]
+    )
 
     await call.message.edit_text(
-        f"Товар: {call.data}g\nЦена: {price} грн\n\nПодтвердить заказ?",
+        f"Вес: {weight}g\nЦена: {price} грн\n\nВыберите район:",
         reply_markup=kb
     )
 
-@dp.callback_query(F.data == "pay")
-async def pay(call: CallbackQuery, state: FSMContext):
+# ================== ПОДТВЕРЖДЕНИЕ ==================
+
+@dp.callback_query(F.data.startswith("r_"))
+async def confirm_order(call: CallbackQuery, state: FSMContext):
+    region = REGIONS[int(call.data.replace("r_", ""))]
+    data = await state.get_data()
+
+    await state.update_data(region=region)
+    await state.set_state(OrderState.confirming)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить ✅", callback_data="confirm_pay")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="product_test")],
+    ])
+
+    await call.message.edit_text(
+        f"📦 Заказ:\n"
+        f"Товар: TEST {data['weight']}g\n"
+        f"Район: {region}\n"
+        f"Цена: {data['price']} грн\n\n"
+        f"Подтвердить заказ?",
+        reply_markup=kb
+    )
+
+# ================== ОПЛАТА ==================
+
+@dp.callback_query(F.data == "confirm_pay")
+async def payment(call: CallbackQuery, state: FSMContext):
     uid = call.from_user.id
     data = await state.get_data()
 
@@ -175,20 +231,27 @@ async def pay(call: CallbackQuery, state: FSMContext):
     save_orders(orders)
 
     timers[uid] = (
-        asyncio.create_task(reminder(uid)),
-        asyncio.create_task(timeout(uid))
+        asyncio.create_task(reminder_timer(uid)),
+        asyncio.create_task(cancel_timer(uid)),
     )
 
     await state.set_state(OrderState.waiting_payment)
 
     await call.message.edit_text(
-        f"💳 5168240100724821 💳\n"
+        f"💳 {CARD_NUMBER} 💳\n"
         f"🏷️ {data['price']} грн 🏷️\n"
         f"⏳ На оплату 15 минут ⏳\n\n"
-        f"❗ После оплаты отправьте PDF-чек"
+        f"❗ После оплаты отправьте электронный чек (PDF) ❗"
     )
 
-# ================= PDF HANDLER =================
+# ================== ПРОВЕРКА PDF ==================
+
+def check_pdf_stub(pdf_path: str, created_at: int, price: int) -> dict:
+    """
+    Заглушка.
+    Пока просто имитирует проверку.
+    """
+    return {"status": "reject", "reason": "Автопроверка ещё не настроена"}
 
 @dp.message(OrderState.waiting_payment, F.document)
 async def pdf_handler(message: Message, state: FSMContext):
@@ -206,14 +269,11 @@ async def pdf_handler(message: Message, state: FSMContext):
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         pdf_path = tmp.name
 
-    # ✅ ПРАВИЛЬНО для aiogram 3
-    await bot.download(message.document, destination=pdf_path)
+    # ✅ ЕДИНСТВЕННЫЙ КОРРЕКТНЫЙ СПОСОБ ДЛЯ AIORAM 3
+    file = await bot.get_file(message.document.file_id)
+    await bot.download_file(file.file_path, destination=pdf_path)
 
-    result = check_pdf(
-        pdf_path,
-        order["created_at"],
-        order["price"]
-    )
+    result = check_pdf_stub(pdf_path, order["created_at"], order["price"])
 
     os.remove(pdf_path)
 
@@ -229,10 +289,10 @@ async def pdf_handler(message: Message, state: FSMContext):
         return
 
     await message.answer(
-        f"❌ Чек не принят\nПричина: {result.get('reason','неизвестно')}"
+        f"❌ Чек отклонён\nПричина: {result.get('reason', 'неизвестно')}"
     )
 
-# ================= RUN =================
+# ================== RUN ==================
 
 async def main():
     await dp.start_polling(bot)
